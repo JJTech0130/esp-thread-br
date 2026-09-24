@@ -1,0 +1,9 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# Slimmed-down table for the 4MB-flash ESP32-C6 (e.g. ESP32-C6FH4): no RCP
+# firmware partition (unused with native radio), single app slot instead of
+# ota_0/ota_1 (no app-level OTA headroom on 4MB). Used only when
+# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME points here (see sdkconfig.defaults.esp32c6.4mb).
+nvs,        data, nvs,      ,  0x6000,
+phy_init,   data, phy,      ,  0x1000,
+factory,    app,  factory,  ,  3M,
+web_storage,data, spiffs,   ,  256K,

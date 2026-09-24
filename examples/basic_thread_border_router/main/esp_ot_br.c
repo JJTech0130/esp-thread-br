@@ -20,15 +20,18 @@
 #include "esp_ot_config.h"
 #include "esp_ot_ota_commands.h"
 #include "esp_ot_wifi_cmd.h"
+#include "esp_openthread_lock.h"
 #include "esp_spiffs.h"
 #include "esp_vfs_eventfd.h"
 #include "mdns.h"
 #include "nvs_flash.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "border_router_launch.h"
 #include "esp_br_web.h"
+#include "protocol_examples_common.h"
 
 #define TAG "esp_ot_br"
 
@@ -51,6 +54,32 @@ static esp_err_t init_spiffs(void)
 #endif
     return ESP_OK;
 }
+
+#if !CONFIG_OPENTHREAD_BR_AUTO_START && CONFIG_EXAMPLE_CONNECT_WIFI
+// Without OPENTHREAD_BR_AUTO_START, nothing else in this codebase connects
+// Wi-Fi or initializes the border-router backbone automatically - upstream's
+// only path for that case is the manual "ot wifi connect" CLI command over
+// serial (see esp_ot_cli_extension's esp_ot_process_wifi_cmd). For a headless
+// board with no cable after flashing, replicate that same sequence
+// (connect -> set backbone netif -> esp_openthread_border_router_init) here
+// at boot instead, using the Kconfig-configured SSID/password. Thread network
+// formation itself is left entirely to the REST API.
+static void connect_wifi_task(void *ctx)
+{
+    esp_err_t err = esp_ot_wifi_connect(CONFIG_EXAMPLE_WIFI_SSID, CONFIG_EXAMPLE_WIFI_PASSWORD);
+    if (err == ESP_OK) {
+        esp_openthread_lock_acquire(portMAX_DELAY);
+        esp_openthread_set_backbone_netif(get_example_netif());
+        ESP_ERROR_CHECK(esp_openthread_border_router_init());
+        esp_openthread_lock_release();
+        esp_ot_wifi_border_router_init_flag_set(true);
+        ESP_LOGI(TAG, "Connected to Wi-Fi: %s", CONFIG_EXAMPLE_WIFI_SSID);
+    } else {
+        ESP_LOGE(TAG, "Failed to connect to Wi-Fi: %s", CONFIG_EXAMPLE_WIFI_SSID);
+    }
+    vTaskDelete(NULL);
+}
+#endif
 
 void app_main(void)
 {
@@ -107,4 +136,8 @@ void app_main(void)
 #endif
 
     launch_openthread_border_router(&openthread_config, &rcp_update_config);
+
+#if !CONFIG_OPENTHREAD_BR_AUTO_START && CONFIG_EXAMPLE_CONNECT_WIFI
+    xTaskCreate(connect_wifi_task, "connect_wifi", 6144, NULL, 4, NULL);
+#endif
 }
