@@ -32,6 +32,7 @@
 #include "border_router_launch.h"
 #include "esp_br_web.h"
 #include "protocol_examples_common.h"
+#include "openthread/dataset.h"
 
 #define TAG "esp_ot_br"
 
@@ -62,8 +63,18 @@ static esp_err_t init_spiffs(void)
 // serial (see esp_ot_cli_extension's esp_ot_process_wifi_cmd). For a headless
 // board with no cable after flashing, replicate that same sequence
 // (connect -> set backbone netif -> esp_openthread_border_router_init) here
-// at boot instead, using the Kconfig-configured SSID/password. Thread network
-// formation itself is left entirely to the REST API.
+// at boot instead, using the Kconfig-configured SSID/password.
+//
+// This only brings Wi-Fi and the backbone up - it does NOT touch the Thread
+// interface itself. otDatasetGetActiveTlvs()/otIp6SetEnabled()/
+// otThreadSetEnabled() are independent of Wi-Fi and aren't re-run
+// automatically by the OpenThread stack on reboot, so without the check
+// below the device would come back up on Wi-Fi after every power cycle but
+// stay stuck at Thread role "disabled" until someone re-PUT /node/state.
+// If a dataset is already stored (from an earlier REST API PUT), resume it
+// automatically - this is normal border-router behavior (rejoin the network
+// you were already on), not the unwanted auto-formation of a brand-new
+// network that OPENTHREAD_BR_AUTO_START would do on a truly blank device.
 static void connect_wifi_task(void *ctx)
 {
     esp_err_t err = esp_ot_wifi_connect(CONFIG_EXAMPLE_WIFI_SSID, CONFIG_EXAMPLE_WIFI_PASSWORD);
@@ -71,7 +82,16 @@ static void connect_wifi_task(void *ctx)
         esp_openthread_lock_acquire(portMAX_DELAY);
         esp_openthread_set_backbone_netif(get_example_netif());
         ESP_ERROR_CHECK(esp_openthread_border_router_init());
+
+        otOperationalDatasetTlvs dataset;
+        if (otDatasetGetActiveTlvs(esp_openthread_get_instance(), &dataset) == OT_ERROR_NONE) {
+            ESP_LOGI(TAG, "Existing Thread dataset found, resuming it");
+            ESP_ERROR_CHECK(esp_openthread_auto_start(&dataset));
+        } else {
+            ESP_LOGI(TAG, "No Thread dataset stored yet, waiting for the REST API");
+        }
         esp_openthread_lock_release();
+
         esp_ot_wifi_border_router_init_flag_set(true);
         ESP_LOGI(TAG, "Connected to Wi-Fi: %s", CONFIG_EXAMPLE_WIFI_SSID);
     } else {
