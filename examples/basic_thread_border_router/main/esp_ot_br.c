@@ -60,8 +60,10 @@ void app_main(void)
     // * border router
     size_t max_eventfd = 3;
 
-#if CONFIG_OPENTHREAD_RADIO_SPINEL_SPI
+#if CONFIG_OPENTHREAD_RADIO_NATIVE || CONFIG_OPENTHREAD_RADIO_SPINEL_SPI
+    // * radio driver (A native radio device needs an eventfd for the radio driver.)
     // * SpiSpinelInterface (The Spi Spinel Interface needs an eventfd.)
+    // The above will not exist at the same time.
     max_eventfd++;
 #endif
 #if CONFIG_OPENTHREAD_RADIO_TREL

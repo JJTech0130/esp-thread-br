@@ -1,0 +1,15 @@
+# Single-chip ESP32-C6: native 802.15.4 radio instead of an external RCP over
+# UART/SPI. Wi-Fi and Thread share one RF path on the C6, so software
+# coexistence has to be enabled. Matches esp-idf's own CI config for this
+# combination (examples/openthread/ot_br/sdkconfig.ci.native_radio).
+CONFIG_OPENTHREAD_RADIO_NATIVE=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# No RCP chip, so there's no RCP firmware to auto-update.
+CONFIG_AUTO_UPDATE_RCP=n
+
+# Enable the REST API / web GUI (esp_ot_br_server). OPENTHREAD_BR_AUTO_START is
+# deliberately left off (Kconfig default) so the Thread network is only formed
+# or joined through the REST API (PUT /node/dataset/active, PUT /node/state),
+# not auto-provisioned.
+CONFIG_OPENTHREAD_BR_START_WEB=y
