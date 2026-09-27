@@ -44,6 +44,10 @@
 #include "openthread/thread.h"
 #include "openthread/thread_ftd.h"
 
+#if CONFIG_OPENTHREAD_BR_WEB_BASIC_AUTH
+#include "mbedtls/base64.h"
+#endif
+
 #define MAX_FILE_SIZE (200 * 1024) // 200 KB
 #define MAX_FILE_SIZE_STR "200KB"
 #define SCRATCH_BUFSIZE 1024 /* Scratch buffer size */
@@ -386,10 +390,98 @@ static cJSON *resource_status(char *error, char *msg)
     return root;
 }
 
+#if CONFIG_OPENTHREAD_BR_WEB_BASIC_AUTH
+// Every route this server registers - REST API, web GUI pages, and the "/*"
+// static-file catch-all - goes through either httpd_server_register_http_uri()
+// or the one extra httpd_register_uri_handler() call for default_uris_get in
+// start_esp_br_http_server(). Wrapping registration here, instead of adding an
+// auth check to every individual handler in esp_br_web_api.c/esp_br_web_base.c,
+// is the only way to guarantee nothing gets missed as routes are added later.
+//
+// httpd dispatches by setting req->user_ctx to whatever was registered on the
+// matching httpd_uri_t. Several existing handlers depend on that value (e.g.
+// httpd_request_convert2_json() casts it to http_server_data_t*), so this
+// wrapper can't just claim user_ctx for its own bookkeeping - it stashes the
+// original handler/user_ctx pair in a private table indexed by registration
+// order, and once auth passes, restores req->user_ctx to the original value
+// before calling through.
+typedef struct {
+    esp_err_t (*handler)(httpd_req_t *req);
+    void *user_ctx;
+} auth_wrapped_handler_t;
+
+#define MAX_AUTH_WRAPPED_HANDLERS 64
+static auth_wrapped_handler_t s_auth_wrapped[MAX_AUTH_WRAPPED_HANDLERS];
+static size_t s_auth_wrapped_count = 0;
+
+static bool check_basic_auth(httpd_req_t *req)
+{
+    char auth_hdr[160];
+    if (httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr, sizeof(auth_hdr)) != ESP_OK) {
+        return false;
+    }
+
+    static const char prefix[] = "Basic ";
+    if (strncmp(auth_hdr, prefix, sizeof(prefix) - 1) != 0) {
+        return false;
+    }
+    const char *b64 = auth_hdr + sizeof(prefix) - 1;
+
+    unsigned char decoded[128] = {0};
+    size_t out_len = 0;
+    if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &out_len, (const unsigned char *)b64, strlen(b64)) != 0) {
+        return false;
+    }
+    decoded[out_len] = '\0';
+
+    char expected[192];
+    snprintf(expected, sizeof(expected), "%s:%s", CONFIG_OPENTHREAD_BR_WEB_AUTH_USERNAME,
+              CONFIG_OPENTHREAD_BR_WEB_AUTH_PASSWORD);
+
+    // Not constant-time - this is a deterrent against casual/accidental access
+    // on a shared network (see the Kconfig help text), not a defense against
+    // an attacker who can already measure response timing.
+    return strcmp((char *)decoded, expected) == 0;
+}
+
+static esp_err_t send_401(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"esp-ot-br\"");
+    httpd_resp_send(req, "Unauthorized", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t auth_wrapper(httpd_req_t *req)
+{
+    auth_wrapped_handler_t *ctx = (auth_wrapped_handler_t *)req->user_ctx;
+    if (!check_basic_auth(req)) {
+        return send_401(req);
+    }
+    req->user_ctx = ctx->user_ctx;
+    return ctx->handler(req);
+}
+
+static esp_err_t wrap_uri_with_auth(httpd_uri_t *uri)
+{
+    ESP_RETURN_ON_FALSE(s_auth_wrapped_count < MAX_AUTH_WRAPPED_HANDLERS, ESP_ERR_NO_MEM, WEB_TAG,
+                        "Too many routes for MAX_AUTH_WRAPPED_HANDLERS (%d)", MAX_AUTH_WRAPPED_HANDLERS);
+    auth_wrapped_handler_t *ctx = &s_auth_wrapped[s_auth_wrapped_count++];
+    ctx->handler = uri->handler;
+    ctx->user_ctx = uri->user_ctx;
+    uri->handler = auth_wrapper;
+    uri->user_ctx = ctx;
+    return ESP_OK;
+}
+#endif // CONFIG_OPENTHREAD_BR_WEB_BASIC_AUTH
+
 static esp_err_t httpd_server_register_http_uri(const http_server_t *server, httpd_uri_t *uris, uint8_t size)
 {
     ESP_RETURN_ON_FALSE((server->handle && uris), ESP_ERR_INVALID_ARG, WEB_TAG, "Invalid argument");
     for (int i = 0; i < size; i++) {
+#if CONFIG_OPENTHREAD_BR_WEB_BASIC_AUTH
+        ESP_RETURN_ON_ERROR(wrap_uri_with_auth(&uris[i]), WEB_TAG, "Failed to wrap %s with auth", uris[i].uri);
+#endif
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server->handle, &uris[i]), WEB_TAG,
                             "Failed to register %s for %d", uris[i].uri, i);
     }
@@ -1490,6 +1582,12 @@ static httpd_handle_t *start_esp_br_http_server(const char *base_path)
 {
     ESP_RETURN_ON_FALSE(base_path, NULL, WEB_TAG, "Invalid http server path");
 
+#if CONFIG_OPENTHREAD_BR_WEB_BASIC_AUTH
+    ESP_RETURN_ON_FALSE(strlen(CONFIG_OPENTHREAD_BR_WEB_AUTH_PASSWORD) > 0, NULL, WEB_TAG,
+                        "OPENTHREAD_BR_WEB_BASIC_AUTH is enabled with an empty password - refusing to start "
+                        "the web server unprotected. Set OPENTHREAD_BR_WEB_AUTH_PASSWORD.");
+#endif
+
 #if CONFIG_SPIRAM
     cJSON_Hooks hooks;
     hooks.malloc_fn = ot_web_json_malloc;
@@ -1520,6 +1618,9 @@ static httpd_handle_t *start_esp_br_http_server(const char *base_path)
 
     httpd_server_register_http_uri(&s_server, s_resource_handlers, sizeof(s_resource_handlers) / sizeof(httpd_uri_t));
     httpd_server_register_http_uri(&s_server, s_web_gui_handlers, sizeof(s_web_gui_handlers) / sizeof(httpd_uri_t));
+#if CONFIG_OPENTHREAD_BR_WEB_BASIC_AUTH
+    wrap_uri_with_auth(&default_uris_get);
+#endif
     httpd_register_uri_handler(s_server.handle, &default_uris_get);
 
     return s_server.handle;

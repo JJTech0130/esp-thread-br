@@ -1,0 +1,27 @@
+menu "ESP Thread Border Router Web Server"
+    depends on OPENTHREAD_BR_START_WEB
+
+    config OPENTHREAD_BR_WEB_BASIC_AUTH
+        bool "Require HTTP Basic Auth for the REST API / web GUI"
+        select MBEDTLS_BASE64_C
+        default n
+        help
+            Require an HTTP Basic Auth username/password on every REST API and
+            web GUI request. The server has no TLS, so credentials are sent
+            in cleartext - this stops casual or accidental access on a shared
+            network, not an attacker already sniffing traffic on that network.
+
+    config OPENTHREAD_BR_WEB_AUTH_USERNAME
+        string "Basic Auth username"
+        depends on OPENTHREAD_BR_WEB_BASIC_AUTH
+        default "admin"
+
+    config OPENTHREAD_BR_WEB_AUTH_PASSWORD
+        string "Basic Auth password"
+        depends on OPENTHREAD_BR_WEB_BASIC_AUTH
+        default ""
+        help
+            Leave this blank and the build will refuse to start the web
+            server with auth enabled (see the check in esp_br_web.c) - an
+            empty password would otherwise silently protect nothing.
+endmenu
